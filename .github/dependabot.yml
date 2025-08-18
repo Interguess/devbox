@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: "gradle"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      timezone: "Europe/Dublin"
+      time: "07:00"
+      interval: "daily"
