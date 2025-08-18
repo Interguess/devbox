@@ -1,0 +1,8 @@
+rootProject.name = 'devbox'
+include 'client'
+include 'server'
+include 'cli'
+include 'backend'
+include 'backend:common'
+include 'backend:master'
+include 'backend:worker'
