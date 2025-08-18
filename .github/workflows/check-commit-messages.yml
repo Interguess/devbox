@@ -1,0 +1,109 @@
+# MIT License
+#
+# Copyright (c) 2025 Interguess.com
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the 'Software'), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+name: Check commit messages for conventional commits
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-changelog:
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set baseTag and headTag
+        id: tags
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "baseTag=refs/heads/${{ github.base_ref }}" >> $GITHUB_ENV
+            echo "headTag=refs/heads/${{ github.head_ref }}" >> $GITHUB_ENV
+          else
+            PR_URL="${{ github.event.issue.pull_request.url }}"
+            PR_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "$PR_URL")
+            BASE=$(echo "$PR_JSON" | jq -r .base.ref)
+            HEAD=$(echo "$PR_JSON" | jq -r .head.ref)
+            echo "baseTag=refs/heads/$BASE" >> $GITHUB_ENV
+            echo "headTag=refs/heads/$HEAD" >> $GITHUB_ENV
+          fi
+        shell: bash
+
+      - name: Collect ocm lines from PR description and comments and create JSON
+        id: collect_ocm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --json body -q '.body' || true)
+          PR_COMMENTS=$(gh pr view ${{ github.event.pull_request.number }} --json comments -q '.comments[].body' || true)
+          ALL_TEXTS="$PR_BODY
+          $PR_COMMENTS"
+          OCM_LINES=$(echo "$ALL_TEXTS" | tr -s '\r\n' '\n' | sed 's/^[ \t]*//' | grep -oE 'ocm "[^"]+" *-> *"[^"]+"' || true)
+          if [ -z "$OCM_LINES" ]; then
+            RESULT="{}"
+          else
+            RESULT=$(echo "$OCM_LINES" | awk '
+              BEGIN { printf("{"); first=1 }
+              {
+                if (!first) { printf(", ") } else { first=0 }
+                match($0, /^ocm "([^"]+)" *-> *"([^"]+)"/, arr)
+                printf("\"%s\": \"%s\"", arr[1], arr[2])
+              }
+              END { print("}") }
+            ')
+          fi
+          echo "RESULT=$RESULT" >> $GITHUB_OUTPUT
+
+      - name: Run Changelog Action
+        id: changelog
+        uses: Interguess/changelog-action@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          baseTag: ${{ env.baseTag }}
+          headTag: ${{ env.headTag }}
+          overrides: ${{ steps.collect_ocm.outputs.RESULT }}
+
+      - name: Fail if there are changelog issues
+        run: |
+          ISSUES_JSON='${{ steps.changelog.outputs.issues }}'
+          ISSUE_COUNT=$(echo "$ISSUES_JSON" | jq 'length')
+          
+          if [ "$ISSUE_COUNT" -gt 0 ]; then
+            echo "🚨 $ISSUE_COUNT commit messages in this pull request do not conform to conventional commits format!"
+            echo ""
+            echo "📋 Issues found:"
+            echo "$ISSUES_JSON" | jq -r '.[] | "  • " + .'
+            echo ""
+            echo "🔧 Fix guide: https://github.com/Interguess/changelog-action?tab=readme-ov-file#commit-messages--pull-requests"
+            exit 1
+          fi
