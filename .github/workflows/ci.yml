@@ -1,0 +1,333 @@
+# MIT License
+#
+# Copyright (c) 2025 Interguess.com
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the 'Software'), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+name: CI
+
+on:
+  pull_request:
+    types: [ closed ]
+    branches: [ develop, main ]
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+
+jobs:
+  on-merge:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Init rollback state
+        run: |
+          echo "REPO=${{ github.repository }}" >> state.env
+          echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> state.env
+          echo "BASE_BRANCH=${{ github.base_ref }}" >> state.env
+          echo "HEAD_SHA=${{ github.sha }}" >> state.env
+
+      - name: Set baseTag and headTag
+        id: tags
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "baseTag=refs/heads/${{ github.base_ref }}" >> $GITHUB_ENV
+            echo "headTag=refs/heads/${{ github.head_ref }}" >> $GITHUB_ENV
+          else
+            PR_URL="${{ github.event.issue.pull_request.url }}"
+            PR_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "$PR_URL")
+            BASE=$(echo "$PR_JSON" | jq -r .base.ref)
+            HEAD=$(echo "$PR_JSON" | jq -r .head.ref)
+            echo "baseTag=refs/heads/$BASE" >> $GITHUB_ENV
+            echo "headTag=refs/heads/$HEAD" >> $GITHUB_ENV
+          fi
+
+      - name: Collect ocm lines from PR description and comments and create JSON
+        id: collect_ocm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --json body -q '.body' || true)
+          PR_COMMENTS=$(gh pr view ${{ github.event.pull_request.number }} --json comments -q '.comments[].body' || true)
+          ALL_TEXTS="$PR_BODY
+          $PR_COMMENTS"
+          OCM_LINES=$(echo "$ALL_TEXTS" | tr -s '\r\n' '\n' | sed 's/^[ \t]*//' | grep -oE 'ocm "[^"]+"# -># "[^"]+"' || true)
+          if [ -z "$OCM_LINES" ]; then
+            RESULT="{}"
+          else
+            RESULT=$(echo "$OCM_LINES" | awk '
+              BEGIN { printf("{"); first=1 }
+              {
+                if (!first) { printf(", ") } else { first=0 }
+                match($0, /^ocm "([^"]+)"# -># "([^"]+)"/, arr)
+                printf("\"%s\": \"%s\"", arr[1], arr[2])
+              }
+              END { print("}") }
+            ')
+          fi
+          echo "RESULT=$RESULT" >> $GITHUB_OUTPUT
+
+      - name: Run Changelog Action
+        id: changelog
+        uses: Interguess/changelog-action@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          baseTag: ${{ env.baseTag }}
+          headTag: ${{ env.headTag }}
+          overrides: ${{ steps.collect_ocm.outputs.RESULT }}
+
+      - name: Determine BASE and last tags
+        id: tagctx
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ github.base_ref }}"
+          echo "BASE=$BASE" | tee -a $GITHUB_ENV $GITHUB_OUTPUT
+          echo "BASE_BRANCH=$BASE" >> state.env
+
+          git fetch --tags --force
+
+          if [[ "$BASE" == "main" ]]; then
+            LAST_TAG=$(git tag --list --sort=-v:refname | grep -v '\-develop' | head -n1 || echo "")
+            echo "LAST_TAG=$LAST_TAG" | tee -a $GITHUB_ENV $GITHUB_OUTPUT
+            echo "LAST_MAIN_TAG=" >> $GITHUB_OUTPUT
+            echo "LAST_DEVELOP_TAG=" >> $GITHUB_OUTPUT
+          else
+            LAST_MAIN_TAG=$(git tag --list --sort=-v:refname | grep -v '\-develop' | head -n1 || echo "")
+            LAST_DEVELOP_TAG=$(git tag --list "*-develop.*" --sort=-v:refname | head -n1 || echo "")
+            echo "LAST_MAIN_TAG=$LAST_MAIN_TAG" | tee -a $GITHUB_ENV $GITHUB_OUTPUT
+            echo "LAST_DEVELOP_TAG=$LAST_DEVELOP_TAG" | tee -a $GITHUB_ENV $GITHUB_OUTPUT
+            echo "LAST_TAG=" | tee -a $GITHUB_ENV $GITHUB_OUTPUT
+          fi
+
+      - name: Calculate semantic version name
+        id: version
+        uses: Interguess/semver-action@main
+        with:
+          baseBranch: ${{ steps.tagctx.outputs.BASE }}
+          upgradeType: ${{ steps.changelog.outputs.semVerChange || 'PATCH' }}
+          lastTag: ${{ steps.tagctx.outputs.LAST_TAG }}
+          lastMainTag: ${{ steps.tagctx.outputs.LAST_MAIN_TAG }}
+          lastDevelopTag: ${{ steps.tagctx.outputs.LAST_DEVELOP_TAG }}
+
+      - name: Export NEW_VERSION env
+        run: |
+          echo "NEW_VERSION=${{ steps.version.outputs.version }}" >> $GITHUB_ENV
+          echo "NEW_VERSION=${{ steps.version.outputs.version }}" >> state.env
+
+      - name: Decide if this is a final release (sets latest)
+        id: latest
+        shell: bash
+        run: |
+          TAG='${{ env.NEW_VERSION }}'
+          if [[ "${{ env.NEW_VERSION }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract Docker metadata (tags, labels)
+        id: meta_img
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ env.NEW_VERSION }}
+            type=semver,pattern={{version}},value=${{ env.NEW_VERSION }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.NEW_VERSION }}
+            type=semver,pattern={{major}},value=${{ env.NEW_VERSION }}
+          flavor: |
+            latest=${{ steps.latest.outputs.is_release }}
+
+      - name: Record image tags for rollback
+        run: |
+          echo 'IMAGE_TAGS<<EOF' >> state.env
+          echo "${{ steps.meta_img.outputs.tags }}" | tr ',' '\n' >> state.env
+          echo 'EOF' >> state.env
+
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'corretto'
+          java-version: '21'
+
+      - name: Grant execute permission to Gradle
+        run: chmod +x gradlew
+
+      - name: ShadowJar for docker image
+        run: ./gradlew shadowJar --no-daemon
+        env:
+          RELEASE_VERSION: ${{ env.NEW_VERSION }}
+          IGXSYS_REED_USER: ${{ secrets.IGXSYS_REED_USER }}
+          IGXSYS_REED_TOKEN: ${{ secrets.IGXSYS_REED_TOKEN }}
+
+      - name: Create Git Tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${{ env.NEW_VERSION }}" -m "Release ${{ env.NEW_VERSION }}"
+          git push origin "${{ env.NEW_VERSION }}"
+          echo "GIT_TAG=${{ env.NEW_VERSION }}" >> state.env
+
+      - name: Upload Release Asset
+        id: upload_release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '**/build/libs/*.jar'
+          tag_name: ${{ env.NEW_VERSION }}
+          name: v${{ env.NEW_VERSION }}
+          generate_release_notes: true
+          prerelease: ${{ github.base_ref == 'develop' }}
+          fail_on_unmatched_files: true
+
+      - name: Record release tag for rollback
+        run: echo "RELEASE_TAG=${{ env.NEW_VERSION }}" >> state.env
+
+      - name: Save rollback state
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-state
+          path: state.env
+          if-no-files-found: error
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta_img.outputs.tags }}
+          labels: ${{ steps.meta_img.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            "JAR_FILE=bootstrap/build/libs/discord-bot-test-bootstrap-${{ env.NEW_VERSION }}.jar"
+
+  rollback:
+    runs-on: ubuntu-latest
+    needs: [ on-merge ]
+    if: failure()
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download rollback state
+        uses: actions/download-artifact@v4
+        with:
+          name: release-state
+          path: .
+
+      - name: Load state
+        run: |
+          set -a
+          source state.env || true
+          set +a
+          echo "Loaded state:"
+          cat state.env || true
+
+      - name: Delete GitHub Release (best effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${RELEASE_TAG:-}" ]; then
+            if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+              gh release delete "${RELEASE_TAG}" -y || true
+            fi
+          fi
+
+      - name: Delete Git Tag (best effort)
+        continue-on-error: true
+        run: |
+          if [ -n "${GIT_TAG:-}" ]; then
+            git push origin :refs/tags/"${GIT_TAG}" || true
+            git tag -d "${GIT_TAG}" || true
+          fi
+
+      - name: Delete GHCR image tags (best effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          IMAGE: ${{ github.event.repository.name }}
+        run: |
+          delete_version() {
+            local version_id="$1"
+            gh api -X DELETE -H "Accept: application/vnd.github+json" \
+              /orgs/${OWNER}/packages/container/${IMAGE}/versions/${version_id} >/dev/null 2>&1 && return 0
+            gh api -X DELETE -H "Accept: application/vnd.github+json" \
+              /users/${OWNER}/packages/container/${IMAGE}/versions/${version_id} >/dev/null 2>&1 || return 1
+          }
+          list_versions() {
+            gh api -H "Accept: application/vnd.github+json" \
+              /orgs/${OWNER}/packages/container/${IMAGE}/versions --paginate 2>/dev/null \
+              || gh api -H "Accept: application/vnd.github+json" \
+              /users/${OWNER}/packages/container/${IMAGE}/versions --paginate 2>/dev/null
+          }
+
+          if [ -n "${IMAGE_TAGS:-}" ]; then
+            for tag in $IMAGE_TAGS; do
+              [ -z "$tag" ] && continue
+              VID=$(list_versions | jq -r ".[ ] | select(.metadata.container.tags[]? == \"${tag}\") | .id" | head -n1)
+              if [ -n "$VID" ]; then
+                delete_version "$VID" || true
+              fi
+            done
+          fi
+
+      - name: Create Revert PR
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "${BASE_BRANCH}:${BASE_BRANCH}" --force
+          git checkout -B "revert/${HEAD_SHA}" "origin/${BASE_BRANCH}"
+          git revert -m 1 ${HEAD_SHA} --no-edit || git revert ${HEAD_SHA} --no-edit || true
+          git push origin "revert/${HEAD_SHA}" || true
+          gh pr create \
+            --base "${BASE_BRANCH}" \
+            --head "revert/${HEAD_SHA}" \
+            --title "Revert: ${HEAD_SHA} (auto-rollback)" \
+            --body "Automatisches Rollback, da der Release-Workflow fehlgeschlagen ist." || true
