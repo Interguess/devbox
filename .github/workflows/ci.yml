@@ -211,13 +211,6 @@ jobs:
       - name: Record release tag for rollback
         run: echo "RELEASE_TAG=${{ env.NEW_VERSION }}" >> state.env
 
-      - name: Save rollback state
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-state
-          path: state.env
-          if-no-files-found: error
-
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -321,4 +314,4 @@ jobs:
             --base "${BASE_BRANCH}" \
             --head "revert/${HEAD_SHA}" \
             --title "Revert: ${HEAD_SHA} (auto-rollback)" \
-            --body "Automatisches Rollback, da der Release-Workflow fehlgeschlagen ist." || true
+            --body "Rollback." || true
