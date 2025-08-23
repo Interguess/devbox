@@ -43,13 +43,6 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Save rollback state
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-state
-          path: state.env
-          if-no-files-found: error
-
       - name: Init rollback state
         run: |
           echo "REPO=${{ github.repository }}" >> state.env
