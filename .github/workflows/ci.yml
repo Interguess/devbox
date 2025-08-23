@@ -48,23 +48,17 @@ jobs:
           echo "REPO=${{ github.repository }}" >> state.env
           echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> state.env
           echo "BASE_BRANCH=${{ github.base_ref }}" >> state.env
-          echo "HEAD_SHA=${{ github.sha }}" >> state.env
+          echo "HEAD_SHA=${{ github.event.pull_request.merge_commit_sha || github.sha }}" >> state.env
 
-      - name: Set baseTag and headTag
+      # FIX: Nutze SHAs statt refs/heads/*
+      - name: Set baseTag and headTag (use SHAs)
         id: tags
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "baseTag=refs/heads/${{ github.base_ref }}" >> $GITHUB_ENV
-            echo "headTag=refs/heads/${{ github.head_ref }}" >> $GITHUB_ENV
-          else
-            PR_URL="${{ github.event.issue.pull_request.url }}"
-            PR_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "$PR_URL")
-            BASE=$(echo "$PR_JSON" | jq -r .base.ref)
-            HEAD=$(echo "$PR_JSON" | jq -r .head.ref)
-            echo "baseTag=refs/heads/$BASE" >> $GITHUB_ENV
-            echo "headTag=refs/heads/$HEAD" >> $GITHUB_ENV
-          fi
+          echo "baseTag=${{ github.event.pull_request.base.sha }}" >> $GITHUB_ENV
+          echo "headTag=${{ github.event.pull_request.head.sha }}" >> $GITHUB_ENV
+          echo "baseTag=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+          echo "headTag=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
 
       - name: Collect ocm lines from PR description and comments and create JSON
         id: collect_ocm
@@ -97,8 +91,8 @@ jobs:
         uses: Interguess/changelog-action@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          baseTag: ${{ env.baseTag }}
-          headTag: ${{ env.headTag }}
+          baseTag: ${{ env.baseTag }}   # SHA
+          headTag: ${{ env.headTag }}   # SHA
           overrides: ${{ steps.collect_ocm.outputs.RESULT }}
 
       - name: Determine BASE and last tags
@@ -109,9 +103,7 @@ jobs:
           BASE="${{ github.base_ref }}"
           echo "BASE=$BASE" | tee -a $GITHUB_ENV $GITHUB_OUTPUT
           echo "BASE_BRANCH=$BASE" >> state.env
-
           git fetch --tags --force
-
           if [[ "$BASE" == "main" ]]; then
             LAST_TAG=$(git tag --list --sort=-v:refname | grep -v '\-develop' | head -n1 || echo "")
             echo "LAST_TAG=$LAST_TAG" | tee -a $GITHUB_ENV $GITHUB_OUTPUT
@@ -304,7 +296,6 @@ jobs:
               || gh api -H "Accept: application/vnd.github+json" \
               /users/${OWNER}/packages/container/${IMAGE}/versions --paginate 2>/dev/null
           }
-
           if [ -n "${IMAGE_TAGS:-}" ]; then
             for tag in $IMAGE_TAGS; do
               [ -z "$tag" ] && continue
