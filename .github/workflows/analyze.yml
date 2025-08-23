@@ -51,9 +51,6 @@ jobs:
 
       - name: Build with Gradle
         run: ./gradlew build --no-daemon
-        env:
-          IGXSYS_REED_USER: ${{ secrets.IGXSYS_REED_USER }}
-          IGXSYS_REED_TOKEN: ${{ secrets.IGXSYS_REED_TOKEN }}
 
       - name: Run Checkstyle (modern action)
         uses: dbelyaev/action-checkstyle@v1.22.0
