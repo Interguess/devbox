@@ -1,3 +1,17 @@
+plugins {
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
 dependencies {
 
+}
+
+shadowJar {
+    archiveFileName = String.format('%s-%s-%s.jar', project(':').name, project.name, project(':').version)
+
+    manifest {
+        attributes(
+                'Main-Class': 'com.interguess.devbox.cli.CliBootstrap'
+        )
+    }
 }
