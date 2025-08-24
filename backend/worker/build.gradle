@@ -3,7 +3,7 @@ plugins {
 }
 
 dependencies {
-
+    implementation project(":backend:common")
 }
 
 shadowJar {
