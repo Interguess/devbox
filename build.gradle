@@ -34,13 +34,13 @@ allprojects {
     }
 
     dependencies {
-        compileOnly 'org.projectlombok:lombok:1.18.38'
+        compileOnly 'org.projectlombok:lombok:1.18.42'
 
         implementation 'com.google.code.gson:gson:2.13.1'
         implementation 'org.jetbrains:annotations:26.0.2'
         implementation 'ch.qos.logback:logback-classic:1.5.18'
 
-        annotationProcessor 'org.projectlombok:lombok:1.18.38'
+        annotationProcessor 'org.projectlombok:lombok:1.18.42'
     }
 
     tasks.withType(JavaCompile).configureEach {
